@@ -1,36 +1,70 @@
 const express = require('express')
 const { faker } = require('@faker-js/faker')
+const {
+	ReasonPhrases,
+	StatusCodes
+} = require('http-status-codes');
+const cron = require("node-cron"); 
+
 
 const app = express()
-const port = 3000
 app.use(express.json());
 
+let maintainceDownTime = false;
+let profilesArray = [];
+let authCredentials = {};
+
+const port = 3000
 const fields = [ 'name', 'sex', 'dob', 'married', 'jobTitle', 'address', 'company', 'email']
   
-let profilesArray = [];
 
-for(let i=0; i < 500; i++) {
-  profilesArray.push({
-    'name': faker.name.fullName(),
-    'sex': faker.name.sex(),
-    'dob': faker.date.birthdate(),
-    'married': faker.datatype.boolean(),
-    'jobTitle': faker.name.jobTitle(),
-    'address': faker.address.city(),
-    'company': faker.company.name(),
-    'email': faker.internet.email(),
-  })
+const resetProfilesArray = () => {
+  console.info('reseting profiles array')
+  profilesArray = [];
+  for(let i=0; i < 500; i++) {
+    profilesArray.push({
+      'name': faker.name.fullName(),
+      'sex': faker.name.sex(),
+      'dob': faker.date.birthdate(),
+      'married': faker.datatype.boolean(),
+      'jobTitle': faker.name.jobTitle(),
+      'address': faker.address.city(),
+      'company': faker.company.name(),
+      'email': faker.internet.email(),
+    })
+  }  
 }
 
-const authCredentials = {
-  username: faker.internet.userName(),
-  password: faker.internet.password()
+const resetAuthCredential = () => {
+  console.info('reseting auth credentials')
+  authCredentials = {
+    username: faker.internet.userName(),
+    password: faker.internet.password()
+  };
 }
+
+resetProfilesArray();
+resetAuthCredential();
+
+/** MiddleWares */
+async function requestInfoMiddleware(req, res, next) {
+  console.info(Object.keys(req.route.methods), req.route.path);
+  next();
+}
+
+async function isAppUnderMaintainence(req, res, next) {
+  if(maintainceDownTime) {
+    res.status(StatusCodes.SERVICE_UNAVAILABLE).send({error: ReasonPhrases.SERVICE_UNAVAILABLE})
+    return
+  }
+  next();
+}
+
 /** Basic Auth Checker */
 async function basicAuth(req, res, next) {
  
   if (!req.headers.authorization || req.headers.authorization.indexOf('Basic ') === -1) {
-      return res.status(401).json({ message: 'Missing Authorization Header' });
+      return res.status(StatusCodes.UNAUTHORIZED).json({ message: 'Missing Authorization Header' });
   }
 
   const base64Credentials =  req.headers.authorization.split(' ')[1];
@@ -38,7 +72,7 @@ async function basicAuth(req, res, next) {
   const [username, password] = credentials.split(':');
   
   if (username !== authCredentials.username || password !== authCredentials.password) {
-      return res.status(401).json({ message: 'Invalid Authentication Credentials' });
+      return res.status(StatusCodes.UNAUTHORIZED).json({ message: 'Invalid Authentication Credentials' });
   }
   req.user = username;
   next();
@@ -60,20 +94,40 @@ const validateFields = function(o, required_fields) {
   return missingFields
 }
 
-app.get('/v1/authentication', (req, res) => {
+cron.schedule("0 * * * *", function () {
+  console.info(`Running cron for resetng ${Date()}`)
+  resetProfilesArray();
+  resetAuthCredential();
+});
+
+/** Endpoints */
+app.get('/v1/authentication', isAppUnderMaintainence, (req, res) => {
   res.send({data: authCredentials})
 })
 
-app.get('/v1/employees/unsecure', (req, res) => {
+app.get('/v1/employees', isAppUnderMaintainence, (req, res) => {
   res.send({data: profilesArray})
 })
 
-app.get('/v1/employees/secure', basicAuth, (req, res) => {
+
+app.get('/v1/employees/secure', isAppUnderMaintainence, basicAuth, (req, res) => {
   res.send({data: profilesArray})
 })
 
-app.post('/v1/employee', (req, res) => {
-  console.log(req.body)
+app.get('/v1/employee/:id', isAppUnderMaintainence, (req, res) => {
+  if(req.params.id < 0 || req.params.id >= profilesArray.length) {
+    res.status(StatusCodes.NOT_FOUND).send({ data: {'code': StatusCodes.NOT_FOUND, 'message': 'record does not exist'}})
+    return
+  }
+  res.send({data: profilesArray.at(req.params.id)})
+})
+
+
+app.post('/v1/employee', isAppUnderMaintainence, requestInfoMiddleware, (req, res) => {
+  if(profilesArray.length > 750 ) {
+    res.status(StatusCodes.INSUFFICIENT_STORAGE).send({error: ReasonPhrases.INSUFFICIENT_STORAGE})
+    return
+  }
   const profile = req.body
   let response = {}
   const validate = validateFields(profile, fields)
@@ -86,7 +140,7 @@ app.post('/v1/employee', (req, res) => {
   res.status(response.code).send({ data: response})
 })
 
-app.put('/v1/employee/:id', (req, res) => {
+app.put('/v1/employee/:id', isAppUnderMaintainence, requestInfoMiddleware, (req, res) => {
   const empId = req.params.id
   const profile = req.body
   let response = {}
@@ -97,23 +151,17 @@ app.put('/v1/employee/:id', (req, res) => {
    }
     response = { 'id': empId , ...profile}
   } else { 
-    response = { error: `Missing fields ${validate}` , code : 400} 
+    response = { error: `Missing fields ${validate}` , code : StatusCodes.BAD_REQUEST} 
   }
-  res.status(isEmpty(response.code) ? 200 : response.code).send({ data: response})
+  res.status(isEmpty(response.code) ? StatusCodes.OK : response.code).send({ data: response})
 })
 
-app.get('/v1/employee/:id', (req, res) => {
-  if(req.params.id < 0 || req.params.id >= profilesArray.length) {
-    res.status(404).send({ data: {'code': 404, 'message': 'record does not exist'}})
-    return
-  }
-  res.send({data: profilesArray.at(req.params.id)})
-})
 
-app.patch('/v1/employee/:id', (req, res) => {
+
+app.patch('/v1/employee/:id', isAppUnderMaintainence, requestInfoMiddleware, (req, res) => {
   const empId = req.params.id
   if(req.params.id < 0 || req.params.id >= profilesArray.length) {
-    res.status(404).send({ data: {'code': 404, 'message': 'record does not exist'}})
+    res.status(StatusCodes.NOT_FOUND).send({ data: {'code': StatusCodes.NOT_FOUND, 'message': 'record does not exist'}})
     return
   }
   const patchRequest = req.body;
@@ -125,17 +173,31 @@ app.patch('/v1/employee/:id', (req, res) => {
   res.send({data: profilesArray.at(req.params.id)})
 })
 
-app.delete('/v1/employee/:id', (req, res) => {
+app.delete('/v1/employee/:id', isAppUnderMaintainence, requestInfoMiddleware, (req, res) => {
   const empId = req.params.id
   if(req.params.id < 0 || req.params.id >= profilesArray.length) {
-    res.status(404).send({'code':404, 'message': 'record does not exist'})
+    res.status(StatusCodes.NOT_FOUND).send({'code': StatusCodes.NOT_FOUND, 'message': 'record does not exist'})
     return
   }
   profilesArray.splice(empId, 1);
-  res.status(204).send({})
+  res.status(StatusCodes.NO_CONTENT).send({})
 })
 
-app.get('/', (req, res) => {
+app.post('/v1/maintainence', (req, res) => {
+  // TO DO secure with password 
+  maintainceDownTime = !maintainceDownTime
+  res.status(StatusCodes.OK).send({'undermaintainence': maintainceDownTime})
+})
+
+app.post('/v1/reset', (req, res) => {
+  // TO DO secure with password 
+  maintainceDownTime = false
+  resetAuthCredential();
+  resetProfilesArray();
+  res.status(StatusCodes.NO_CONTENT).send({})
+})
+
+app.get('/', isAppUnderMaintainence, requestInfoMiddleware, (req, res) => {
   res.send('Hello World!')
 })
 
