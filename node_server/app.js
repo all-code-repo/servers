@@ -5,7 +5,7 @@ const {
 	StatusCodes
 } = require('http-status-codes');
 const cron = require("node-cron"); 
-
+const bodyParser = require('body-parser')
 
 const app = express()
 app.use(express.json());
@@ -198,6 +198,7 @@ app.post('/v1/reset', (req, res) => {
 })
 
 app.get('/', isAppUnderMaintainence, requestInfoMiddleware, (req, res) => {
+  console.log(req)
   res.send('Hello World!')
 })
 
